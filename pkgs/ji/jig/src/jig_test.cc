@@ -48,6 +48,7 @@ auto FixtureHash(char first) -> std::string {
 }
 auto VendorRoot() -> std::string { return JIG_STORE_DIR "/" + FixtureHash('0') + "-cargo-vendor"; }
 auto OutRoot() -> std::string { return JIG_STORE_DIR "/" + FixtureHash('9') + "-openssl"; }
+auto TwinRoot(char first) -> std::string { return JIG_STORE_DIR "/" + FixtureHash(first) + "-twin"; }
 
 void TestBase() {
   assert(jig::SplitWhitespace("  a  b\tc\n") == V({"a", "b", "c"}));
@@ -132,6 +133,9 @@ void TestStoreResolve() {
   assert(store.Resolve(store.MaskHashes(vendored)) == vendored);
   assert(!store.Resolve(dir + "/*-elsewhere/f.h"));
   assert(store.Resolve("/tmp/f.h") == "/tmp/f.h");
+  // two roots of one name ($JIG_STORE_ROOTS, main): a path under it is neither's
+  assert(!store.Resolve(dir + "/*-twin/include/x.h"));
+  assert(store.ResolveAll(TwinRoot('1') + "/x.h") == dir + "/*-twin/x.h");
   // a config text from another build: its root becomes ours, quoted or not, longer names untouched
   const std::string other = dir + "/" + std::string(jig::kStoreHashLength, 'a') + vendor.substr(vendor.find('-'));
   assert(store.ResolveAll("p=\"" + other + "/x\" q=" + other + "-ng/y") ==
@@ -657,9 +661,10 @@ void TestNixStore() {
 
 // NOLINTNEXTLINE(bugprone-exception-escape): a throwing test is a failing test
 auto main() -> int {
-  setenv("JIG_STORE_IDENTITY", "content", 1);          // NOLINT(concurrency-mt-unsafe): before any Store::Get
-  setenv("JIG_STORE_ROOTS", VendorRoot().c_str(), 1);  // NOLINT(concurrency-mt-unsafe)
-  setenv("out", OutRoot().c_str(), 1);                 // NOLINT(concurrency-mt-unsafe)
+  const std::string roots = VendorRoot() + " " + TwinRoot('1') + " " + TwinRoot('2');
+  setenv("JIG_STORE_IDENTITY", "content", 1);   // NOLINT(concurrency-mt-unsafe): before any Store::Get
+  setenv("JIG_STORE_ROOTS", roots.c_str(), 1);  // NOLINT(concurrency-mt-unsafe)
+  setenv("out", OutRoot().c_str(), 1);          // NOLINT(concurrency-mt-unsafe)
   TestBase();
   TestStoreMask();
   TestStoreKey();

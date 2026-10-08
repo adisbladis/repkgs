@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -36,11 +37,18 @@ Store::Store() : by_content_(Env("JIG_STORE_IDENTITY", "path") == "content"), ou
   }
   std::vector<std::string> roots = Split(Env("JIG_STORE_ROOTS"), ' ');
   roots.push_back(out_);
+  std::unordered_set<std::string> shared;
   for (std::string& root : roots) {
     root.resize(std::min(root.size(), root.find('/', dir_.size() + 1)));  // <store>/<hash-name>[/…]
     if (std::string masked = MaskHashes(root); masked != root) {
-      masked_to_real_.emplace(std::move(masked), std::move(root));
+      if (const auto [entry, added] = masked_to_real_.try_emplace(masked, root); !added && entry->second != root) {
+        shared.insert(std::move(masked));
+      }
     }
+  }
+  // a name two roots carry maps back to neither: a cached path under it could be either's
+  for (const std::string& name : shared) {
+    masked_to_real_.erase(name);
   }
 }
 
