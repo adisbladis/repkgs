@@ -1,5 +1,8 @@
 // Nix store awareness: what counts as immutable, and how store paths enter cache keys.
-// The store directory is a compile-time constant (-DJIG_STORE_DIR="..." from builtins.storeDir).
+// The store directory is a compile-time constant (-DJIG_STORE_DIR="..." from builtins.storeDir), and
+// so is the shape of its hashes: Nix's, unless -DJIG_STORE_HASH_LENGTH=<n>,
+// -DJIG_STORE_HASH_ALPHABET="<characters>" and -DJIG_STORE_HASH_PLACEHOLDER='<character>' describe
+// another store's.
 //
 // JIG_STORE_IDENTITY=path (default): a store file is identified by its path and store paths in
 //   arguments are hashed verbatim - exact and free for an immutable store.
@@ -22,7 +25,25 @@
 
 namespace jig {
 
-constexpr size_t kStoreHashLength = 32;  // base-32 characters before the '-' in a store path name
+#ifdef JIG_STORE_HASH_LENGTH
+constexpr size_t kStoreHashLength = JIG_STORE_HASH_LENGTH;
+#else
+constexpr size_t kStoreHashLength = 32;  // characters before the '-' in a store path name
+#endif
+#ifdef JIG_STORE_HASH_ALPHABET
+constexpr std::string_view kStoreHashAlphabet = JIG_STORE_HASH_ALPHABET;
+#else
+constexpr std::string_view kStoreHashAlphabet = "0123456789abcdfghijklmnpqrsvwxyz";  // nix base32: no e o u t
+#endif
+
+// fills our own output's hash in what is keyed and stored: no hash holds it, so no real path collides
+// with the placeholder
+#ifdef JIG_STORE_HASH_PLACEHOLDER
+constexpr char kOutPlaceholder = JIG_STORE_HASH_PLACEHOLDER;
+#else
+constexpr char kOutPlaceholder = 'e';
+#endif
+static_assert(!kStoreHashAlphabet.contains(kOutPlaceholder), "the placeholder must not be a hash character");
 
 class Store {
  public:
@@ -74,7 +95,7 @@ class Store {
   bool by_content_ = false;
   [[nodiscard]] auto SwapOutHash(std::string bytes, bool back) const -> std::string;
   std::string out_;       // our own, still mutable, output
-  std::string out_hash_;  // its 32 hash characters, "" outside a build
+  std::string out_hash_;  // its hash characters, "" outside a build
   std::unordered_map<std::string, std::string> masked_to_real_;
   std::unordered_map<std::string, std::string> known_ids_;
 };

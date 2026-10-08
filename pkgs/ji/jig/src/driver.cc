@@ -32,8 +32,10 @@ auto RealDir(const std::string& path) -> std::string {
   return error ? path : canonical.string();
 }
 
+// a store may itself live under one of these
 auto IsHostDir(std::string_view path) -> bool {
-  return path.starts_with("/usr") || path.starts_with("/lib") || path.starts_with("/opt");
+  return !Store::Get().IsStorePath(path) &&
+         (path.starts_with("/usr") || path.starts_with("/lib") || path.starts_with("/opt"));
 }
 
 // Ordered, de-duplicated RUNPATH under construction.

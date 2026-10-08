@@ -38,12 +38,16 @@ using jig::WriteFile;
 
 auto V(std::initializer_list<const char*> items) -> std::vector<std::string> { return {items.begin(), items.end()}; }
 
-#define VENDOR_ROOT \
-  JIG_STORE_DIR "/0123456789abcdfghijklmnpqrsvwxyz-cargo-vendor"  // NOLINT(cppcoreguidelines-macro-usage): setenv
-#define OUT_ROOT \
-  JIG_STORE_DIR "/9123456789abcdfghijklmnpqrsvwxyz-openssl"  // NOLINT(cppcoreguidelines-macro-usage): setenv
-                                                             // before statics
-constexpr std::string_view kVendor = VENDOR_ROOT;
+// a fixture store hash in the store's format starting with `first`: for Nix's, the alphabet in order
+auto FixtureHash(char first) -> std::string {
+  std::string hash(jig::kStoreHashLength, first);
+  for (size_t i = 1; i < hash.size(); ++i) {
+    hash.at(i) = jig::kStoreHashAlphabet.at(i % jig::kStoreHashAlphabet.size());
+  }
+  return hash;
+}
+auto VendorRoot() -> std::string { return JIG_STORE_DIR "/" + FixtureHash('0') + "-cargo-vendor"; }
+auto OutRoot() -> std::string { return JIG_STORE_DIR "/" + FixtureHash('9') + "-openssl"; }
 
 void TestBase() {
   assert(jig::SplitWhitespace("  a  b\tc\n") == V({"a", "b", "c"}));
@@ -80,21 +84,24 @@ void TestStoreMask() {
   assert(store.IsStorePath(dir + "/x"));
   assert(!store.IsStorePath(dir));
   assert(!store.IsStorePath("/tmp/x"));
-  const std::string header = dir + "/0123456789abcdfghijklmnpqrsvwxyz-glibc-2.44/include/stdio.h";
+  const std::string header = dir + "/" + FixtureHash('0') + "-glibc-2.44/include/stdio.h";
   assert(store.MaskHashes(header) == dir + "/*-glibc-2.44/include/stdio.h");
   assert(store.MaskHashes("-I" + header + " -I" + header) ==
          "-I" + store.MaskHashes(header) + " -I" + store.MaskHashes(header));
   assert(store.MaskHashes(dir + "/short-name") == dir + "/short-name");
-  const std::string once = dir + "/*-linux-headers-boot/include/asm-generic/errno.h";  // byte 32 after '*' is '-'
+  // an already masked name whose byte kStoreHashLength after '*' is '-'
+  const std::string once = dir + "/*-" + std::string(jig::kStoreHashLength - 2, 'a') + "-headers/include/errno.h";
   assert(store.MaskHashes(once) == once);
   // the own output's hash is a fixed placeholder in what is keyed and stored, and comes back
-  const std::string define = "-DENGINESDIR=\"" OUT_ROOT "/lib/engines\"";
+  const std::string define = "-DENGINESDIR=\"" + OutRoot() + "/lib/engines\"";
   const std::string masked = store.MaskOut(define);
-  assert(masked == "-DENGINESDIR=\"" JIG_STORE_DIR "/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-openssl/lib/engines\"");
+  assert(masked == "-DENGINESDIR=\"" JIG_STORE_DIR "/" + std::string(jig::kStoreHashLength, jig::kOutPlaceholder) +
+                       "-openssl/lib/engines\"");
+  assert(store.MaskHashes(masked) == masked);
   assert(store.UnmaskOut(masked) == define);
   assert(store.MaskOut(header) == header);
-  // a literal run of 'e' that is not a store path stays
-  const std::string pad = "char pad[] = \"" + std::string(40, 'e') + "\";";
+  // a literal run of the placeholder character that is not a store path stays
+  const std::string pad = "char pad[] = \"" + std::string(jig::kStoreHashLength + 8, jig::kOutPlaceholder) + "\";";
   assert(store.UnmaskOut(pad) == pad);
 }
 
@@ -119,8 +126,8 @@ void TestStoreKey() {
 void TestStoreResolve() {
   jig::Store const& store = jig::Store::Get();
   const std::string dir = store.dir();
-  // kVendor is in $JIG_STORE_ROOTS (main), an unrelated root is not
-  const std::string vendor(kVendor);
+  // the vendor root is in $JIG_STORE_ROOTS (main), an unrelated root is not
+  const std::string vendor = VendorRoot();
   const std::string vendored = vendor + "/x-1.0/src/util.rs";
   assert(store.Resolve(store.MaskHashes(vendored)) == vendored);
   assert(!store.Resolve(dir + "/*-elsewhere/f.h"));
@@ -279,12 +286,13 @@ void TestManifest() {
   assert(jig::ValidateManifest(offline, key, manifest.text).error_or("") == "inputs-changed:" + dir + "/b.h");
 
   // absent lookups: a hit needs them still absent. Existing (the compiler's own output) and store paths drop out
+  const std::string in_store = jig::Store::Get().dir() + "/x-y/z.h";
   const jig::Manifest shadow = jig::BuildManifest(offline, key, V({"src.c", (dir + "/a.h").c_str()}), "src.c",
                                                   V({
                                                       (dir + "/early/a.h").c_str(),
                                                       (dir + "/./early//a.h").c_str(),
                                                       (dir + "/b.h").c_str(),
-                                                      "/nix/store/x-y/z.h",
+                                                      in_store.c_str(),
                                                       "",
                                                   }));
   assert(jig::Split(shadow.text, '\n') ==
@@ -561,8 +569,9 @@ auto Dylib(std::uint32_t text_off, std::uint64_t file_size, const std::string& d
 void TestMachOFixup() {
   constexpr std::uint64_t kFileSize = 2048;
   constexpr std::uint32_t kRoomy = 1024;
-  const std::string prefix_lib = std::string(OUT_ROOT) + "/lib/";
-  const std::string dep = JIG_STORE_DIR "/7123456789abcdfghijklmnpqrsvwxyz-zlib/lib/libz.1.dylib";
+  const std::string prefix_lib = OutRoot() + "/lib/";
+  const std::string zlib = FixtureHash('7') + "-zlib";
+  const std::string dep = JIG_STORE_DIR "/" + zlib + "/lib/libz.1.dylib";
   // an @rpath id (cmake's default) becomes absolute, an @rpath load of our own dylib @loader_path
   const std::string dylibs = macho::DylibCommand(macho::kIdDylib, "@rpath/libssl.3.dylib") +
                              macho::DylibCommand(macho::kLoadDylib, "@rpath/libcrypto.3.dylib") +
@@ -577,7 +586,7 @@ void TestMachOFixup() {
   assert(jig::WriteFile(tmp / "lib/libcrypto.3.dylib", ""));
   jig::FixupContext ctx;
   ctx.prefix = tmp;
-  ctx.dest = std::string(OUT_ROOT);
+  ctx.dest = OutRoot();
   ctx.own_lib_dirs = {tmp / "lib"};
   jig::BinaryImage image(file);
   assert(jig::FixMachO(ctx, dylib, image));
@@ -586,10 +595,9 @@ void TestMachOFixup() {
   assert(after.size() == kFileSize);
   assert(after.contains(prefix_lib + "libssl.3.dylib"));
   assert(after.contains("@loader_path/libcrypto.3.dylib"));
-  assert(after.contains("@loader_path/../../7123456789abcdfghijklmnpqrsvwxyz-zlib/lib/libz.1.dylib"));
+  assert(after.contains("@loader_path/../../" + zlib + "/lib/libz.1.dylib"));
   assert(after.contains("/usr/lib/libSystem.B.dylib"));
-  assert(!after.contains("7123456789abcdfghijklmnpqrsvwxyz-zlib/") ||
-         after.contains("../../7123456789abcdfghijklmnpqrsvwxyz-zlib/"));
+  assert(!after.contains(zlib + "/") || after.contains("../../" + zlib + "/"));
 
   // loads dyld could not resolve: @rpath nothing of ours provides, a dangling @loader_path, a
   // system library the SDK lacks. One it has passes
@@ -649,9 +657,9 @@ void TestNixStore() {
 
 // NOLINTNEXTLINE(bugprone-exception-escape): a throwing test is a failing test
 auto main() -> int {
-  setenv("JIG_STORE_IDENTITY", "content", 1);  // NOLINT(concurrency-mt-unsafe): before any Store::Get
-  setenv("JIG_STORE_ROOTS", VENDOR_ROOT, 1);   // NOLINT(concurrency-mt-unsafe)
-  setenv("out", OUT_ROOT, 1);                  // NOLINT(concurrency-mt-unsafe)
+  setenv("JIG_STORE_IDENTITY", "content", 1);          // NOLINT(concurrency-mt-unsafe): before any Store::Get
+  setenv("JIG_STORE_ROOTS", VendorRoot().c_str(), 1);  // NOLINT(concurrency-mt-unsafe)
+  setenv("out", OutRoot().c_str(), 1);                 // NOLINT(concurrency-mt-unsafe)
   TestBase();
   TestStoreMask();
   TestStoreKey();

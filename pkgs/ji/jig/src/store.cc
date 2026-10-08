@@ -49,12 +49,11 @@ auto Store::IsStorePath(std::string_view path) const -> bool {
 }
 
 namespace {
-// nix base32 (no e o u t). Guards against re-masking an already masked "*-name/..." whose next
-// 32 bytes happen to end before a '-'
+// the store's alphabet. Guards against re-masking an already masked "*-name/..." whose next
+// kStoreHashLength bytes happen to end before a '-'
 auto IsStoreHash(std::string_view text) -> bool {
-  return text.size() == kStoreHashLength && std::ranges::all_of(text, [](char chr) -> bool {
-           return std::string_view("0123456789abcdfghijklmnpqrsvwxyz").contains(chr);
-         });
+  return text.size() == kStoreHashLength &&
+         std::ranges::all_of(text, [](char chr) -> bool { return kStoreHashAlphabet.contains(chr); });
 }
 }  // namespace
 
@@ -71,17 +70,13 @@ auto Store::MaskHashes(std::string text) const -> std::string {
   return text;
 }
 
-// nix store hashes never contain e, o, u or t: no real path collides with the placeholder
-constexpr std::string_view kOutPlaceholder = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-static_assert(kOutPlaceholder.size() == kStoreHashLength);
-
-// only as "<store>/<hash>-": a bare run of 32 'e' is not ours
+// only as "<store>/<hash>-": a bare run of the placeholder character is not ours
 auto Store::SwapOutHash(std::string bytes, bool back) const -> std::string {
   if (out_hash_.empty()) {
     return bytes;
   }
   const std::string real = dir_ + "/" + out_hash_ + "-";
-  const std::string placeholder = dir_ + "/" + std::string(kOutPlaceholder) + "-";
+  const std::string placeholder = dir_ + "/" + std::string(kStoreHashLength, kOutPlaceholder) + "-";
   const std::string& from = back ? placeholder : real;
   const std::string& into = back ? real : placeholder;
   for (size_t pos = 0; (pos = bytes.find(from, pos)) != std::string::npos; pos += from.size()) {
