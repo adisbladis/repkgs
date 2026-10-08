@@ -188,10 +188,27 @@ struct CachedResult {
   std::string stderr_text;
 };
 
+// The hash of the compile's preprocessed text, store hashes masked as in keys: for a compiler that
+// does not report its missed lookups, the record of every header those lookups resolved to
+auto PreprocessedIdentity(const std::string& compiler, const Invocation& inv) -> std::optional<std::string> {
+  const fs::path out_dir = inv.output.has_parent_path() ? inv.output.parent_path() : fs::path(".");
+  const fs::path text_path = out_dir / std::format(".jig{}.i", ::getpid());
+  const RunResult run = Run(compiler, PreprocessArgs(inv, text_path.string()), StderrMode::kCapture);
+  std::optional<std::string> text = ReadFile(text_path);
+  std::error_code ignored;
+  fs::remove(text_path, ignored);
+  if (run.status != 0 || !text) {
+    return std::nullopt;
+  }
+  const Store& store = Store::Get();
+  return HashOf(store.MaskForReplay(store.MaskOut(std::move(*text)))).hex();
+}
+
 // the error is why there is nothing to replay (FindResult's, or "object-gone")
-auto Lookup(CacheClient& cache, const RequestKey& request_key, const Invocation& inv)
+auto Lookup(CacheClient& cache, const std::string& compiler, const RequestKey& request_key, const Invocation& inv)
     -> std::expected<CachedResult, std::string> {
-  const std::expected<ResultKey, std::string> result_key = FindResult(cache, request_key);
+  const std::expected<ResultKey, std::string> result_key =
+      FindResult(cache, request_key, [&] -> std::optional<std::string> { return PreprocessedIdentity(compiler, inv); });
   if (!result_key) {
     return std::unexpected(result_key.error());
   }
@@ -281,6 +298,7 @@ struct Observed {
   std::optional<std::string> link_dep_text;
   std::vector<std::string> inputs;
   std::vector<std::string> absent;  // looked up and not found (our clang's $JIG_ABSENT_LOG)
+  bool absent_logged = false;       // the compiler wrote that log: it reports its missed lookups
 };
 
 auto RunObserved(CacheClient& cache, const std::string& compiler, const Invocation& inv) -> Observed {
@@ -325,6 +343,7 @@ auto RunObserved(CacheClient& cache, const std::string& compiler, const Invocati
   obs.link_dep_text = links ? ReadFile(link_depfile) : std::nullopt;
   if (const std::optional<std::string> text = ReadFile(absent_log)) {
     obs.absent = Split(*text, '\n');
+    obs.absent_logged = true;
   }
   std::error_code ignored;
   fs::remove(absent_log, ignored);
@@ -354,17 +373,24 @@ auto CompileAndStore(CacheClient& cache, const std::string& compiler, const Requ
   const Store& store = Store::Get();
   const std::string subject = inv.source + " " + why;
   const bool links = inv.link_one || inv.link;
-  const auto [run, dep_text, link_dep_text, inputs, absent] = RunObserved(cache, compiler, inv);
+  const auto [run, dep_text, link_dep_text, inputs, absent, absent_logged] = RunObserved(cache, compiler, inv);
+  // a compiler that does not report its missed lookups is held to its preprocessed text
+  const bool needs_text = !absent_logged && !inv.link && !IsPlainAssembly(inv.source);
+  std::optional<std::string> preprocessed;
+  const auto held = [&] -> bool {
+    preprocessed = needs_text ? PreprocessedIdentity(compiler, inv) : std::nullopt;
+    return !needs_text || preprocessed.has_value();
+  };
 
   if (run.status != 0) {
     ForwardStdout(inv, std::nullopt);
     // replayable only if every input is known. A missing header or any link error depends on
     // a killed or crashed compiler says nothing about the inputs
-    if (!dep_text || links || run.stderr_text.contains("file not found") || !Deterministic(run)) {
+    if (!dep_text || links || run.stderr_text.contains("file not found") || !Deterministic(run) || !held()) {
       LogOutcome("cc", Outcome::kMissFail, subject, clock);
       return run.status;
     }
-    const Manifest manifest = BuildManifest(cache, request_key, inputs, inv.source, absent);
+    const Manifest manifest = BuildManifest(cache, request_key, inputs, inv.source, absent, preprocessed);
     cache.Put(slot::Manifest(request_key), manifest.text);
     cache.Put(slot::ExitStatus(manifest.result_key), std::to_string(run.status));
     cache.Put(slot::Stderr(manifest.result_key), store.MaskOut(run.stderr_text));
@@ -374,11 +400,11 @@ auto CompileAndStore(CacheClient& cache, const std::string& compiler, const Requ
 
   const std::optional<std::string> object = ReadFile(inv.output);
   ForwardStdout(inv, object);
-  if (!dep_text || !object || (links && !link_dep_text)) {
+  if (!dep_text || !object || (links && !link_dep_text) || !held()) {
     LogOutcome("cc", Outcome::kMissUnstored, subject, clock);
     return 0;
   }
-  const Manifest manifest = BuildManifest(cache, request_key, inputs, inv.source, absent);
+  const Manifest manifest = BuildManifest(cache, request_key, inputs, inv.source, absent, preprocessed);
   cache.Put(slot::Manifest(request_key), manifest.text);
   cache.Put(slot::Object(manifest.result_key), store.MaskOut(*object));
   cache.Put(slot::Stderr(manifest.result_key), store.MaskOut(run.stderr_text));
@@ -553,6 +579,24 @@ auto ParseInvocation(std::span<const std::string> args) -> Invocation {
   return inv;
 }
 
+auto PreprocessArgs(const Invocation& inv, const std::string& text_path) -> std::vector<std::string> {
+  static constexpr std::array kDropped{"-c"sv, "-S"sv, "-E"sv, "-MD"sv, "-MMD"sv, "-MP"sv};
+  static constexpr std::array kDroppedWithValue{"-o"sv, "-MF"sv, "-MT"sv, "-MQ"sv};
+  std::vector<std::string> args;
+  for (size_t i = 0; i < inv.args.size(); ++i) {
+    const std::string& arg = inv.args.at(i);
+    const bool joined =
+        (arg.starts_with("-o") && arg.size() > 2) || arg.starts_with("-Wp,-MD,") || arg.starts_with("-Wp,-MMD,");
+    if (std::ranges::contains(kDroppedWithValue, arg) && i + 1 < inv.args.size()) {
+      ++i;
+    } else if (!joined && !std::ranges::contains(kDropped, arg)) {
+      args.push_back(arg);
+    }
+  }
+  args.insert(args.end(), {"-E", "-o", text_path});
+  return args;
+}
+
 auto RunCcMode(std::string_view argv0, std::span<const std::string> raw_args, const std::string& socket_path) -> int {
   const Stopwatch clock;
   // ghc puts the whole link behind one @rsp, -shared and -o included: classify, key and link
@@ -603,7 +647,7 @@ auto RunCcMode(std::string_view argv0, std::span<const std::string> raw_args, co
 
   *primary += "\ntoolchain=" + ToolchainIds(cache, compiler, inv);
   const RequestKey request_key = ComputeRequestKey(compiler, inv, *primary);
-  const std::expected<CachedResult, std::string> hit = Lookup(cache, request_key, inv);
+  const std::expected<CachedResult, std::string> hit = Lookup(cache, compiler, request_key, inv);
   if (hit) {
     const int status = Replay(*hit, inv);
     LogOutcome("cc", status == 0 ? Outcome::kHit : Outcome::kHitFail, inv.source, clock);

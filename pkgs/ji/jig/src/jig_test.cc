@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <initializer_list>
+#include <optional>
 #include <print>
 #include <string>
 #include <string_view>
@@ -246,6 +247,10 @@ void TestParsePch() {
 }
 
 void TestParsePreprocess() {
+  // the preprocessor run a compiler without a missed-lookup log is held to
+  assert(jig::PreprocessArgs(ParseInvocation(V({"-O2", "-c", "a.c", "-o", "out/a.o", "-MD", "-MF", "out/a.d", "-MT",
+                                                "x", "-Wp,-MD,k.d", "-Iinc"})),
+                             "t.i") == V({"-O2", "a.c", "-Iinc", "-E", "-o", "t.i"}));
   Invocation inv = ParseInvocation(V({"-std=gnu23", "-E", "conftest.c"}));
   assert(inv.cacheable && inv.compile_only && inv.to_stdout && inv.key_args == V({"-std=gnu23", "-E"}));
   inv = ParseInvocation(V({"-E", "conftest.c", "-o", "-"}));
@@ -305,6 +310,17 @@ void TestManifest() {
   std::filesystem::create_directories(dir + "/early");
   jig::WriteFile(dir + "/early/a.h", "A2");
   assert(jig::ValidateManifest(offline, key, shadow.text).error_or("") == "appeared:" + dir + "/early/a.h");
+
+  // a compiler that reports no missed lookups: k2 also folds the preprocessed text, asked at validation
+  const jig::Manifest held =
+      jig::BuildManifest(offline, key, V({"src.c", (dir + "/a.h").c_str()}), "src.c", {}, std::string("t1"));
+  assert(held.text.ends_with("\n#preprocessed\n"));
+  const auto text = [](const char* hash) -> jig::Preprocess {
+    return [hash] -> std::optional<std::string> { return hash; };
+  };
+  assert(jig::ValidateManifest(offline, key, held.text, text("t1")) == held.result_key);
+  assert(jig::ValidateManifest(offline, key, held.text, text("t2")).value() != held.result_key);
+  assert(jig::ValidateManifest(offline, key, held.text).error_or("") == "preprocess-failed");
   std::filesystem::remove_all(dir);
 }
 

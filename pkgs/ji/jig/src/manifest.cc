@@ -63,17 +63,21 @@ auto ParseDepfile(std::string_view text) -> std::vector<std::string> {
 
 namespace {
 
+constexpr std::string_view kPreprocessed = "#preprocessed";
+
 struct Entry {
   std::string path;  // in this build's store roots, "" when the build lacks the root
-  std::string line;  // as stored: "<masked path>\t<identity>" or "!<masked path>"
-  size_t tab = 0;    // npos for a "!" line
+  std::string line;  // as stored: "<masked path>\t<identity>", "!<masked path>" or "#preprocessed"
+  size_t tab = 0;    // npos for a "!" or "#preprocessed" line
 };
 
 auto ParseManifest(std::string_view text) -> std::vector<Entry> {
   const Store& store = Store::Get();
   std::vector<Entry> entries;
   for (std::string& line : Split(text, '\n')) {
-    if (line.starts_with('!')) {
+    if (line == kPreprocessed) {
+      entries.push_back({.path = "", .line = std::move(line), .tab = std::string::npos});
+    } else if (line.starts_with('!')) {
       std::string path = store.Resolve(line.substr(1)).value_or("");
       entries.push_back({.path = std::move(path), .line = std::move(line), .tab = std::string::npos});
     } else if (const size_t tab = line.find('\t'); tab != std::string::npos) {
@@ -108,7 +112,8 @@ void PrefetchIdentities(CacheClient& cache, std::span<const std::string> paths) 
 }
 
 auto BuildManifest(CacheClient& cache, const RequestKey& request_key, std::span<const std::string> inputs,
-                   std::string_view primary_source, std::span<const std::string> absent) -> Manifest {
+                   std::string_view primary_source, std::span<const std::string> absent,
+                   const std::optional<std::string>& preprocessed) -> Manifest {
   const Store& store = Store::Get();
   PrefetchIdentities(cache, inputs);
   std::string text;
@@ -136,11 +141,15 @@ auto BuildManifest(CacheClient& cache, const RequestKey& request_key, std::span<
       add(key);
     }
   }
+  if (preprocessed) {
+    text += std::string(kPreprocessed) + "\n";
+    hasher.Field(std::string(kPreprocessed) + "\t" + *preprocessed);
+  }
   return Manifest{.text = std::move(text), .result_key = ResultKey(hasher.Finish())};
 }
 
-auto ValidateManifest(CacheClient& cache, const RequestKey& request_key, std::string_view manifest_text)
-    -> std::expected<ResultKey, std::string> {
+auto ValidateManifest(CacheClient& cache, const RequestKey& request_key, std::string_view manifest_text,
+                      const Preprocess& preprocess) -> std::expected<ResultKey, std::string> {
   const Store& store = Store::Get();
   const std::vector<Entry> entries = ParseManifest(manifest_text);
   std::vector<std::string> paths;
@@ -154,6 +163,14 @@ auto ValidateManifest(CacheClient& cache, const RequestKey& request_key, std::st
   Hasher hasher;
   hasher.Field(request_key.text());
   for (const Entry& entry : entries) {
+    if (entry.line == kPreprocessed) {
+      const std::optional<std::string> text = preprocess ? preprocess() : std::nullopt;
+      if (!text) {
+        return std::unexpected("preprocess-failed");
+      }
+      hasher.Field(entry.line + "\t" + *text);
+      continue;
+    }
     if (entry.tab == std::string::npos) {
       if (Exists(entry.path)) {
         return std::unexpected("appeared:" + entry.line.substr(1));
@@ -169,12 +186,13 @@ auto ValidateManifest(CacheClient& cache, const RequestKey& request_key, std::st
   return ResultKey(hasher.Finish());
 }
 
-auto FindResult(CacheClient& cache, const RequestKey& request_key) -> std::expected<ResultKey, std::string> {
+auto FindResult(CacheClient& cache, const RequestKey& request_key, const Preprocess& preprocess)
+    -> std::expected<ResultKey, std::string> {
   const std::optional<std::string> manifest_text = cache.Get(slot::Manifest(request_key));
   if (!manifest_text) {
     return std::unexpected("new-key");
   }
-  return ValidateManifest(cache, request_key, *manifest_text);
+  return ValidateManifest(cache, request_key, *manifest_text, preprocess);
 }
 
 }  // namespace jig

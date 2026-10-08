@@ -7,6 +7,9 @@
 // *failures* whose inputs are all known. Never cached: -M runs, several sources at once,
 // sources mixed with objects, @response files, a failure caused by something absent (missing
 // header, any link error) that a later build might provide.
+//
+// A compiler that does not report the headers it looked for and missed ($JIG_ABSENT_LOG) is held to
+// its preprocessed text: a lookup runs the preprocessor and its output's hash joins the key.
 #pragma once
 
 #include <filesystem>
@@ -37,6 +40,9 @@ struct Invocation {
 };
 
 auto ParseInvocation(std::span<const std::string> args) -> Invocation;
+
+// the compile's command as a preprocessor run writing `text_path`: no object, no depfile
+auto PreprocessArgs(const Invocation& inv, const std::string& text_path) -> std::vector<std::string>;
 
 auto RunCcMode(std::string_view argv0, std::span<const std::string> raw_args, const std::string& socket_path) -> int;
 
