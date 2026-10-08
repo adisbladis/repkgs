@@ -144,6 +144,19 @@ void TestStoreResolve() {
 }
 
 // two packages whose bin/rustc link to one launcher: distinct ids, the launcher not in them
+// "*": every entry of the store, which a sandbox fills with what the build reads; dot files are not roots
+void TestListedRoots() {
+  assert(jig::ListedRoots("/s/a-x /s/b-y", "/s") == V({"/s/a-x", "/s/b-y"}));
+  const std::string dir = "/tmp/jig-roots-" + std::to_string(::getpid());
+  std::filesystem::create_directories(dir + "/a-x");
+  jig::WriteFile(dir + "/b-y", "");
+  jig::WriteFile(dir + "/.links", "");
+  std::vector<std::string> roots = jig::ListedRoots("*", dir);
+  std::ranges::sort(roots);
+  assert(roots == V({(dir + "/a-x").c_str(), (dir + "/b-y").c_str()}));
+  std::filesystem::remove_all(dir);
+}
+
 void TestStoreToolId() {
   jig::Store const& store = jig::Store::Get();
   assert(store.ToolId("/no/such/tool") == "/no/such/tool");
@@ -692,6 +705,7 @@ auto main() -> int {
   TestStoreMask();
   TestStoreKey();
   TestStoreResolve();
+  TestListedRoots();
   TestStoreToolId();
   TestParseInvocation();
   TestParsePch();

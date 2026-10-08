@@ -35,7 +35,7 @@ Store::Store() : by_content_(Env("JIG_STORE_IDENTITY", "path") == "content"), ou
       out_.at(dir_.size() + 1 + kStoreHashLength) == '-') {
     out_hash_ = out_.substr(dir_.size() + 1, kStoreHashLength);
   }
-  std::vector<std::string> roots = Split(Env("JIG_STORE_ROOTS"), ' ');
+  std::vector<std::string> roots = ListedRoots(Env("JIG_STORE_ROOTS"), dir_);
   roots.push_back(out_);
   std::unordered_set<std::string> shared;
   for (std::string& root : roots) {
@@ -50,6 +50,20 @@ Store::Store() : by_content_(Env("JIG_STORE_IDENTITY", "path") == "content"), ou
   for (const std::string& name : shared) {
     masked_to_real_.erase(name);
   }
+}
+
+auto ListedRoots(std::string_view listed, const std::string& dir) -> std::vector<std::string> {
+  if (listed != "*") {
+    return Split(listed, ' ');
+  }
+  std::vector<std::string> roots;
+  std::error_code error;
+  for (std::filesystem::directory_iterator entry(dir, error), end; !error && entry != end; entry.increment(error)) {
+    if (!entry->path().filename().string().starts_with('.')) {
+      roots.push_back(entry->path().string());
+    }
+  }
+  return roots;
 }
 
 auto Store::IsStorePath(std::string_view path) const -> bool {

@@ -9,8 +9,9 @@
 // JIG_STORE_IDENTITY=content: store hashes are masked ("/nix/store/*-name/...") in keys and
 //   manifests, and store files are hashed like any other. A rebuilt-but-identical toolchain or
 //   dependency then still hits. JIG_STORE_ROOTS is the space-separated list of every store dir
-//   the build reads (builder/env.nu store-roots): a masked name maps back to a file through it,
-//   and through nothing else.
+//   the build reads (builder/env.nu store-roots), or "*" for every entry of a store that shows the
+//   build only what it reads (a sandbox's): a masked name maps back to a file through it, and
+//   through nothing else.
 #pragma once
 
 #ifndef JIG_STORE_DIR
@@ -22,6 +23,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace jig {
 
@@ -44,6 +46,9 @@ constexpr char kOutPlaceholder = JIG_STORE_HASH_PLACEHOLDER;
 constexpr char kOutPlaceholder = 'e';
 #endif
 static_assert(!kStoreHashAlphabet.contains(kOutPlaceholder), "the placeholder must not be a hash character");
+
+// JIG_STORE_ROOTS's roots: `listed` split at spaces, or for "*" every entry of `dir`
+auto ListedRoots(std::string_view listed, const std::string& dir) -> std::vector<std::string>;
 
 class Store {
  public:
