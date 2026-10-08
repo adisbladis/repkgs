@@ -205,10 +205,9 @@ auto PreprocessedIdentity(const std::string& compiler, const Invocation& inv) ->
 }
 
 // the error is why there is nothing to replay (FindResult's, or "object-gone")
-auto Lookup(CacheClient& cache, const std::string& compiler, const RequestKey& request_key, const Invocation& inv)
+auto Lookup(CacheClient& cache, const RequestKey& request_key, const Invocation& inv, const Preprocess& preprocess)
     -> std::expected<CachedResult, std::string> {
-  const std::expected<ResultKey, std::string> result_key =
-      FindResult(cache, request_key, [&] -> std::optional<std::string> { return PreprocessedIdentity(compiler, inv); });
+  const std::expected<ResultKey, std::string> result_key = FindResult(cache, request_key, preprocess);
   if (!result_key) {
     return std::unexpected(result_key.error());
   }
@@ -369,7 +368,8 @@ auto RunObserved(CacheClient& cache, const std::string& compiler, const Invocati
 
 // Compile for real, learning the inputs. Store what is replayable. Returns the compiler's status.
 auto CompileAndStore(CacheClient& cache, const std::string& compiler, const RequestKey& request_key,
-                     const Invocation& inv, const std::string& why, const Stopwatch& clock) -> int {
+                     const Invocation& inv, const std::string& why, const Stopwatch& clock,
+                     const Preprocess& preprocess) -> int {
   const Store& store = Store::Get();
   const std::string subject = inv.source + " " + why;
   const bool links = inv.link_one || inv.link;
@@ -378,7 +378,7 @@ auto CompileAndStore(CacheClient& cache, const std::string& compiler, const Requ
   const bool needs_text = !absent_logged && !inv.link && !IsPlainAssembly(inv.source);
   std::optional<std::string> preprocessed;
   const auto held = [&] -> bool {
-    preprocessed = needs_text ? PreprocessedIdentity(compiler, inv) : std::nullopt;
+    preprocessed = needs_text ? preprocess() : std::nullopt;
     return !needs_text || preprocessed.has_value();
   };
 
@@ -647,13 +647,23 @@ auto RunCcMode(std::string_view argv0, std::span<const std::string> raw_args, co
 
   *primary += "\ntoolchain=" + ToolchainIds(cache, compiler, inv);
   const RequestKey request_key = ComputeRequestKey(compiler, inv, *primary);
-  const std::expected<CachedResult, std::string> hit = Lookup(cache, compiler, request_key, inv);
+  // made at most once a run: a lookup's manifest asks first, and a miss stores its entry under the same
+  std::optional<std::string> text_id;
+  bool text_made = false;
+  const Preprocess preprocess = [&] -> std::optional<std::string> {
+    if (!text_made) {
+      text_id = PreprocessedIdentity(compiler, inv);
+      text_made = true;
+    }
+    return text_id;
+  };
+  const std::expected<CachedResult, std::string> hit = Lookup(cache, request_key, inv, preprocess);
   if (hit) {
     const int status = Replay(*hit, inv);
     LogOutcome("cc", status == 0 ? Outcome::kHit : Outcome::kHitFail, inv.source, clock);
     return status;
   }
-  return CompileAndStore(cache, compiler, request_key, inv, hit.error(), clock);
+  return CompileAndStore(cache, compiler, request_key, inv, hit.error(), clock, preprocess);
 }
 
 }  // namespace jig
