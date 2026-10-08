@@ -131,10 +131,11 @@ auto BuildManifest(CacheClient& cache, const RequestKey& request_key, std::span<
       add(std::format("{}\t{}", store.Key(path), *identity));
     }
   }
-  // store paths stay absent; what exists by now the compiler wrote itself (-o, -MF)
+  // a store path stays absent only where its name fixes its content (path mode); what exists by now
+  // the compiler wrote itself (-o, -MF)
   std::set<std::string> seen;
   for (const std::string& path : absent) {
-    if (path.empty() || store.IsStorePath(path) || Exists(path)) {
+    if (path.empty() || (store.IsStorePath(path) && !store.identity_by_content()) || Exists(path)) {
       continue;
     }
     if (const std::string key = "!" + store.Key(path); seen.insert(key).second) {
@@ -172,6 +173,9 @@ auto ValidateManifest(CacheClient& cache, const RequestKey& request_key, std::st
       continue;
     }
     if (entry.tab == std::string::npos) {
+      if (entry.path.empty()) {
+        return std::unexpected("unresolved:" + entry.line.substr(1));
+      }
       if (Exists(entry.path)) {
         return std::unexpected("appeared:" + entry.line.substr(1));
       }

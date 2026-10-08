@@ -294,8 +294,9 @@ void TestManifest() {
   jig::WriteFile(dir + "/b.h", "B2");
   assert(jig::ValidateManifest(offline, key, manifest.text).error_or("") == "inputs-changed:" + dir + "/b.h");
 
-  // absent lookups: a hit needs them still absent. Existing (the compiler's own output) and store paths drop out
-  const std::string in_store = jig::Store::Get().dir() + "/x-y/z.h";
+  // absent lookups: a hit needs them still absent. Existing ones (the compiler's own output) drop out
+  const jig::Store& store = jig::Store::Get();
+  const std::string in_store = VendorRoot() + "/include/z.h";
   const jig::Manifest shadow = jig::BuildManifest(offline, key, V({"src.c", (dir + "/a.h").c_str()}), "src.c",
                                                   V({
                                                       (dir + "/early/a.h").c_str(),
@@ -305,11 +306,17 @@ void TestManifest() {
                                                       "",
                                                   }));
   assert(jig::Split(shadow.text, '\n') ==
-         V({jig::Split(manifest.text, '\n').at(0).c_str(), ("!" + dir + "/early/a.h").c_str()}));
+         V({jig::Split(manifest.text, '\n').at(0).c_str(), ("!" + dir + "/early/a.h").c_str(),
+            ("!" + store.MaskHashes(in_store)).c_str()}));
   assert(jig::ValidateManifest(offline, key, shadow.text) == shadow.result_key);
   std::filesystem::create_directories(dir + "/early");
   jig::WriteFile(dir + "/early/a.h", "A2");
   assert(jig::ValidateManifest(offline, key, shadow.text).error_or("") == "appeared:" + dir + "/early/a.h");
+  // under a name two store roots share, absent cannot be checked
+  const jig::Manifest twin =
+      jig::BuildManifest(offline, key, V({"src.c"}), "src.c", V({(TwinRoot('1') + "/include/z.h").c_str()}));
+  assert(jig::ValidateManifest(offline, key, twin.text).error_or("") ==
+         "unresolved:" + store.dir() + "/*-twin/include/z.h");
 
   // a compiler that reports no missed lookups: k2 also folds the preprocessed text, asked at validation
   const jig::Manifest held =
